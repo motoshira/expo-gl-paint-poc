@@ -4,7 +4,7 @@ Tries to make a paint app with [expo-gl](https://docs.expo.dev/versions/latest/s
 
 ## Live Demo
 
-TODO
+https://main.d17i3r27eu42rl.amplifyapp.com
 
 ## License
 
