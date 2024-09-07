@@ -2,63 +2,27 @@ import React, { useRef } from "react";
 import { Pressable, Text, View } from "react-native";
 import { GLView, ExpoWebGLRenderingContext } from "expo-gl";
 import Delaunator from "delaunator";
+import getNormals from "polyline-normals";
+
+type Lines = {
+  points: number[][];
+  indices: number[][];
+};
 
 export default function App() {
-  const points = useRef<number[][]>(genPoints());
-  const pointsChanged = useRef(true);
+  // const points = useRef<number[][]>(genPoints());
+  const linesChanged = useRef(true);
+  const lines = useRef<Lines>(genSegmentedLines());
   const onContextCreate = (gl: ExpoWebGLRenderingContext) => {
     gl.clearColor(0, 1, 1, 1);
 
-    // points
-    const pointsVert = gl.createShader(gl.VERTEX_SHADER);
-    if (!pointsVert) {
+    // triangles
+    const trianglesVert = gl.createShader(gl.VERTEX_SHADER);
+    if (!trianglesVert) {
       return;
     }
     gl.shaderSource(
-      pointsVert,
-      `#version 300 es
-    in vec2 position;
-
-    void main(void) {
-      gl_Position = vec4(position.x, position.y, 0.0, 1.0);
-      gl_PointSize = 4.0;
-    }
-    `,
-    );
-    gl.compileShader(pointsVert);
-
-    const pointsFrag = gl.createShader(gl.FRAGMENT_SHADER);
-    if (!pointsFrag) {
-      return;
-    }
-    gl.shaderSource(
-      pointsFrag,
-      `#version 300 es
-    precision mediump float;
-    out vec4 outColor;
-
-    void main(void) {
-      outColor = vec4(0.0, 0.0, 0.8, 1.0);
-    }
-  `,
-    );
-    gl.compileShader(pointsFrag);
-
-    const pointsProgram = gl.createProgram();
-    if (!pointsProgram) {
-      return;
-    }
-    gl.attachShader(pointsProgram, pointsVert);
-    gl.attachShader(pointsProgram, pointsFrag);
-    gl.linkProgram(pointsProgram);
-
-    // lines
-    const linesVert = gl.createShader(gl.VERTEX_SHADER);
-    if (!linesVert) {
-      return;
-    }
-    gl.shaderSource(
-      linesVert,
+      trianglesVert,
       `#version 300 es
     in vec2 position;
 
@@ -67,59 +31,56 @@ export default function App() {
     }
     `,
     );
-    gl.compileShader(linesVert);
+    gl.compileShader(trianglesVert);
 
-    const linesFrag = gl.createShader(gl.FRAGMENT_SHADER);
-    if (!linesFrag) {
+    const trianglesFrag = gl.createShader(gl.FRAGMENT_SHADER);
+    if (!trianglesFrag) {
       return;
     }
     gl.shaderSource(
-      linesFrag,
+      trianglesFrag,
       `#version 300 es
     precision mediump float;
     out vec4 outColor;
 
     void main(void) {
-      outColor = vec4(0.0, 0.0, 0.0, 1.0);
+      outColor = vec4(0.0, 0.0, 0.2, 1.0);
     }
   `,
     );
-    gl.compileShader(linesFrag);
+    gl.compileShader(trianglesFrag);
 
-    const linesProgram = gl.createProgram();
-    if (!linesProgram) {
+    const trianglesProgram = gl.createProgram();
+    if (!trianglesProgram) {
       return;
     }
-    gl.attachShader(linesProgram, linesVert);
-    gl.attachShader(linesProgram, linesFrag);
-    gl.linkProgram(linesProgram);
-
-    // setup vao
-    const pointsVao = gl.createVertexArray();
-    gl.bindVertexArray(pointsVao);
-    const pointsVbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, pointsVbo);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array(points.current.flatMap((ps) => ps)),
-      gl.DYNAMIC_DRAW,
-    );
-    const pointsIndex = gl.getAttribLocation(pointsProgram, "position");
-    gl.enableVertexAttribArray(pointsIndex);
-    gl.vertexAttribPointer(pointsIndex, 2, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.attachShader(trianglesProgram, trianglesVert);
+    gl.attachShader(trianglesProgram, trianglesFrag);
+    gl.linkProgram(trianglesProgram);
 
     const linesVao = gl.createVertexArray();
     gl.bindVertexArray(linesVao);
     const linesVbo = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, linesVbo);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
-    const linesIndex = gl.getAttribLocation(linesProgram, "position");
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array(lines.current.points.flatMap((ps) => ps)),
+      gl.DYNAMIC_DRAW,
+    );
+    const linesIndex = gl.getAttribLocation(trianglesProgram, "position");
     gl.enableVertexAttribArray(linesIndex);
     gl.vertexAttribPointer(linesIndex, 2, gl.FLOAT, false, 0, 0);
+
+    const linesIbo = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, linesIbo);
+    gl.bufferData(
+      gl.ELEMENT_ARRAY_BUFFER,
+      new Uint16Array(lines.current.indices.flatMap((indices) => indices)),
+      gl.DYNAMIC_DRAW,
+    );
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
 
     // setup uniform location
     /* const resolutionLocaiton = gl.getUniformLocation(program, "u_resolution"); */
@@ -132,22 +93,37 @@ export default function App() {
        *   gl.drawingBufferWidth,
        *   gl.drawingBufferHeight,
        * ); */
-      gl.useProgram(pointsProgram);
-      if (pointsChanged.current) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, pointsVbo);
-        gl.bufferSubData(
+      gl.useProgram(trianglesProgram);
+      // TODO update lines
+      if (linesChanged.current) {
+        // gl.bindVertexArray(linesVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, linesVbo);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, linesIbo);
+        gl.bufferData(
           gl.ARRAY_BUFFER,
-          0,
-          new Float32Array(points.current.flatMap((ps) => ps)),
+          new Float32Array(lines.current.points.flatMap((ps) => ps)),
+          gl.DYNAMIC_DRAW,
+        );
+        gl.enableVertexAttribArray(linesIndex);
+        gl.vertexAttribPointer(linesIndex, 2, gl.FLOAT, false, 0, 0);
+        gl.bufferData(
+          gl.ELEMENT_ARRAY_BUFFER,
+          new Uint16Array(lines.current.indices.flatMap((indices) => indices)),
+          gl.DYNAMIC_DRAW,
         );
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
-        pointsChanged.current = false;
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+        // gl.bindVertexArray(null);
+        linesChanged.current = false;
       }
-      gl.bindVertexArray(pointsVao);
-      gl.drawArrays(gl.POINTS, 0, points.current.length);
-      gl.useProgram(linesProgram);
       gl.bindVertexArray(linesVao);
-      gl.drawArrays(gl.LINES, 0, lines.length * 2);
+      gl.drawElements(
+        gl.TRIANGLES,
+        lines.current.indices.length * 3,
+        gl.UNSIGNED_SHORT,
+        0,
+      );
+      gl.bindVertexArray(null);
 
       gl.flush();
       gl.endFrameEXP();
@@ -173,8 +149,8 @@ export default function App() {
       <Pressable
         style={{ padding: 20, backgroundColor: "blue", borderRadius: 4 }}
         onPress={() => {
-          points.current = genPoints();
-          pointsChanged.current = true;
+          lines.current = genSegmentedLines();
+          linesChanged.current = true;
         }}
       >
         <Text style={{ fontSize: 20, color: "white" }}>Regenerate</Text>
@@ -216,36 +192,65 @@ const catmullRomSpline = (
  *   return [];
  * };
  *  */
-const genPoints = () => {
+
+const genSegmentedLines = (): {
+  points: number[][];
+  indices: number[][];
+} => {
   const points: number[][] = [];
+  const ls: number[][] = [];
+  const rs: number[][] = [];
   let p0: number[] = [Math.random() * 2 - 1, Math.random() * 2 - 1];
   let p1: number[] = p0;
   let p2: number[] = p0;
   let p3: number[] = p0;
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 10; i++) {
     // [x, y]
     p0 = p1;
     p1 = p2;
     p2 = p3;
     p3 = [Math.random() * 2 - 1, Math.random() * 2 - 1];
     if (p1[0] !== p2[0] && p1[1] !== p2[1]) {
-      for (let t = 0; t < 33; t++) {
-        const p = catmullRomSpline(p0, p1, p2, p3, t * 0.03);
+      for (let t = 0; t < 10; t++) {
+        const p = catmullRomSpline(p0, p1, p2, p3, t * 0.1);
         points.push(p);
       }
     }
   }
-  return points;
+  const normals: number[][] = getNormals(points, false).map(
+    (ps: unknown[]) => ps[0] as number[],
+  );
+  for (let i = 0; i < normals.length; i++) {
+    const p = points[i];
+    const n = normals[i];
+    ls.push([p[0] + n[0] * 0.005, p[1] + n[1] * 0.005]);
+    rs.push([p[0] - n[0] * 0.005, p[1] - n[1] * 0.005]);
+  }
+  const indices: number[][] = [];
+  const ss: number[][] = [];
+  let index: number = 0;
+  // l0, c0, r0, l1, c1, r1, ...
+  for (let i = 0; i < points.length - 1; i++) {
+    const l0 = ls[i];
+    const l1 = ls[i + 1];
+    const c0 = points[i];
+    const c1 = points[i + 1];
+    const r0 = rs[i];
+    const r1 = rs[i + 1];
+    if (i === 0) {
+      ss.push(l0, c0, r0);
+    }
+    ss.push(l1, c1, r1);
+    indices.push(
+      [index, index + 1, index + 3],
+      [index + 3, index + 1, index + 4],
+      [index + 1, index + 2, index + 4],
+      [index + 4, index + 2, index + 5],
+    );
+    index += 3;
+  }
+  return {
+    points: ss,
+    indices: indices,
+  };
 };
-
-// const ts = new Delaunator(ps);
-// const tt = ts.triangles as Uint32Array;
-const lines: number[] = [];
-/* for (let i = 0; i < tt.length; i += 3) {
- *   const p0 = points[tt[i]];
- *   const p1 = points[tt[i + 1]];
- *   const p2 = points[tt[i + 2]];
- *   lines.push(...p0, ...p1);
- *   lines.push(...p1, ...p2);
- *   lines.push(...p2, ...p0);
- * } */
