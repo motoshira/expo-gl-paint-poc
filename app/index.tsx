@@ -3,26 +3,64 @@ import { Pressable, Text, View } from "react-native";
 import { GLView, ExpoWebGLRenderingContext } from "expo-gl";
 import Delaunator from "delaunator";
 import getNormals from "polyline-normals";
+import {
+  Gesture,
+  GestureDetector,
+  GestureHandlerRootView,
+} from "react-native-gesture-handler";
 
-type Lines = {
-  points: number[][];
-  indices: number[][];
-};
+class Vec2 {
+  static rotate(v: number[], theta: number) {
+    return [
+      v[0] * Math.cos(theta) - v[1] * Math.sin(theta),
+      v[0] * Math.sin(theta) + v[1] * Math.cos(theta),
+    ];
+  }
+  static rotate90(v: number[]) {
+    return [-v[1], v[0]];
+  }
+  static normalize(v: number[]) {
+    const l = Math.sqrt(v[0] ** 2 + v[1] ** 2);
+    return [v[0] / l, v[1] / l];
+  }
+  static addVec2(v1: number[], v2: number[]) {
+    return [v1[0] + v2[0], v1[1] + v2[1]];
+  }
+  static subVec2(v1: number[], v2: number[]) {
+    return [v1[0] - v2[0], v1[1] - v2[1]];
+  }
+  static multiplyByNumber(v: number[], r: number) {
+    return v.map((x) => x * r);
+  }
+  static divByNumber(v: number[], r: number) {
+    return v.map((x) => x / r);
+  }
+}
 
-export default function App() {
-  // const points = useRef<number[][]>(genPoints());
-  const linesChanged = useRef(true);
-  const lines = useRef<Lines>(genSegmentedLines());
-  const onContextCreate = (gl: ExpoWebGLRenderingContext) => {
-    gl.clearColor(0, 1, 1, 1);
-
-    // triangles
-    const trianglesVert = gl.createShader(gl.VERTEX_SHADER);
-    if (!trianglesVert) {
-      return;
+class LinesDrawer {
+  // 正十六角形・長方形
+  static LINES_BUFFER_LENGTH = 16 * 2 * 2 * 3 + 2 * 2 * 3;
+  private gl: ExpoWebGLRenderingContext;
+  private target: WebGLRenderbuffer | null;
+  private program: WebGLProgram;
+  private vao: WebGLVertexArrayObject;
+  private vbo: WebGLBuffer;
+  private radius: number = 0.02;
+  private points: number[] = [];
+  private prevPoint: number[] | undefined = undefined;
+  constructor(
+    gl: ExpoWebGLRenderingContext,
+    target: WebGLRenderbuffer | null = null,
+  ) {
+    this.gl = gl;
+    this.target = target;
+    const vert = gl.createShader(gl.VERTEX_SHADER);
+    if (!vert) {
+      throw new Error("Failed to create vertex shader");
     }
+
     gl.shaderSource(
-      trianglesVert,
+      vert,
       `#version 300 es
     in vec2 position;
 
@@ -31,59 +69,157 @@ export default function App() {
     }
     `,
     );
-    gl.compileShader(trianglesVert);
+    gl.compileShader(vert);
 
-    const trianglesFrag = gl.createShader(gl.FRAGMENT_SHADER);
-    if (!trianglesFrag) {
-      return;
+    const frag = gl.createShader(gl.FRAGMENT_SHADER);
+    if (!frag) {
+      throw new Error("Failed to create fragment shader");
     }
     gl.shaderSource(
-      trianglesFrag,
+      frag,
       `#version 300 es
     precision mediump float;
     out vec4 outColor;
 
     void main(void) {
-      outColor = vec4(0.0, 0.0, 0.2, 1.0);
+      outColor = vec4(0.0, 0.0, 0.0, 1.0);
     }
   `,
     );
-    gl.compileShader(trianglesFrag);
+    gl.compileShader(frag);
 
-    const trianglesProgram = gl.createProgram();
-    if (!trianglesProgram) {
-      return;
+    const program = gl.createProgram();
+    if (!program) {
+      throw new Error("Failed to create program");
     }
-    gl.attachShader(trianglesProgram, trianglesVert);
-    gl.attachShader(trianglesProgram, trianglesFrag);
-    gl.linkProgram(trianglesProgram);
+    gl.attachShader(program, vert);
+    gl.attachShader(program, frag);
+    gl.linkProgram(program);
+    this.program = program;
 
-    const linesVao = gl.createVertexArray();
-    gl.bindVertexArray(linesVao);
-    const linesVbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, linesVbo);
+    const vao = gl.createVertexArray()!;
+    gl.bindVertexArray(vao);
+    const vbo = gl.createBuffer()!;
+    this.vbo = vbo;
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferData(
       gl.ARRAY_BUFFER,
-      new Float32Array(lines.current.points.flatMap((ps) => ps)),
+      LinesDrawer.LINES_BUFFER_LENGTH * 10,
       gl.DYNAMIC_DRAW,
     );
-    const linesIndex = gl.getAttribLocation(trianglesProgram, "position");
-    gl.enableVertexAttribArray(linesIndex);
-    gl.vertexAttribPointer(linesIndex, 2, gl.FLOAT, false, 0, 0);
+    const positionIndex = gl.getAttribLocation(program, "position");
+    gl.enableVertexAttribArray(positionIndex);
+    gl.vertexAttribPointer(positionIndex, 2, gl.FLOAT, false, 0, 0);
 
-    const linesIbo = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, linesIbo);
-    gl.bufferData(
-      gl.ELEMENT_ARRAY_BUFFER,
-      new Uint16Array(lines.current.indices.flatMap((indices) => indices)),
-      gl.DYNAMIC_DRAW,
-    );
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    this.vbo = vbo;
+    this.vao = vao;
+  }
+  reset(sx: number, sy: number) {
+    const { gl } = this;
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    this.points = [];
+    this.prevPoint = [sx / width, sy / height].map((p) => p * 2.0 - 1.0);
+  }
+  lineTo(x: number, y: number) {
+    // TODO
+    const { gl, vbo, prevPoint, radius } = this;
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    const np = [x / width, y / height].map((p) => p * 2.0 - 1.0);
+    if (!prevPoint) {
+      throw new Error("prevPoint not set");
+    }
+    // TODO set points (circle and rectangle)
+    const points: number[] = [];
+    for (let i = 0; i < 16; i++) {
+      const p0 = Vec2.addVec2(
+        prevPoint,
+        Vec2.rotate([radius, 0], 2 * Math.PI * (i / 16)),
+      );
+      const p1 = Vec2.addVec2(
+        prevPoint,
+        Vec2.rotate([radius, 0], 2 * Math.PI * ((i + 1) / 16)),
+      );
+      points.push(...[...p0, ...prevPoint, ...p1]);
+    }
+    for (let i = 0; i < 16; i++) {
+      const p0 = Vec2.addVec2(
+        np,
+        Vec2.rotate([radius, 0], 2 * Math.PI * (i / 16)),
+      );
+      const p1 = Vec2.addVec2(
+        np,
+        Vec2.rotate([radius, 0], 2 * Math.PI * ((i + 1) / 16)),
+      );
+      points.push(...[...p0, ...np, ...p1]);
+    }
 
-    // setup uniform location
-    /* const resolutionLocaiton = gl.getUniformLocation(program, "u_resolution"); */
+    const v = Vec2.subVec2(np, prevPoint);
+    const vv = Vec2.multiplyByNumber(
+      Vec2.normalize(Vec2.rotate(v, Math.PI / 2)),
+      radius,
+    );
+    const p0 = Vec2.addVec2(prevPoint, vv);
+    const p1 = Vec2.addVec2(prevPoint, Vec2.multiplyByNumber(vv, -1));
+    const p2 = Vec2.addVec2(np, Vec2.multiplyByNumber(vv, -1));
+    const p3 = Vec2.addVec2(np, vv);
+    points.push(...[...p0, ...p1, ...p2, ...p2, ...p3, ...p0]);
+    console.log(
+      "expected",
+      LinesDrawer.LINES_BUFFER_LENGTH,
+      "actual",
+      points.length,
+    );
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(points));
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    console.log(prevPoint, np, points);
+    this.points = points;
+    this.prevPoint = np;
+  }
+  render() {
+    const { gl, program, vao, points } = this;
+    if (points.length === 0) {
+      return;
+    }
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLES, 0, LinesDrawer.LINES_BUFFER_LENGTH);
+    gl.bindVertexArray(null);
+  }
+}
+
+export default function App() {
+  // const points = useRef<number[][]>(genPoints());
+  const linesDrawer = useRef<LinesDrawer>();
+  const pan = Gesture.Pan()
+    .onStart((g) => {
+      /* "worklets";
+       * const newPaths = [...paths];
+       * newPaths[paths.length] = {
+       *   segments: [],
+       *   color: "#06d6a0",
+       * };
+       * newPaths[paths.length].segments.push(`M ${g.x} ${g.y}`);
+       * setPaths(newPaths); */
+    })
+    .onUpdate((g) => {
+      /* const index = paths.length - 1;
+       * const newPaths = [...paths];
+       * if (newPaths?.[index]?.segments) {
+       *   newPaths[index].segments.push(`L ${g.x} ${g.y}`);
+       *   setPaths(newPaths);
+       * } */
+    })
+    .minDistance(1);
+  const onContextCreate = (gl: ExpoWebGLRenderingContext) => {
+    linesDrawer.current = new LinesDrawer(gl);
+    linesDrawer.current?.reset(150, 150);
+    linesDrawer.current?.lineTo(300, 300);
+    gl.clearColor(0, 1, 1, 1);
 
     function renderLoop() {
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -93,69 +229,43 @@ export default function App() {
        *   gl.drawingBufferWidth,
        *   gl.drawingBufferHeight,
        * ); */
-      gl.useProgram(trianglesProgram);
-      // TODO update lines
-      if (linesChanged.current) {
-        // gl.bindVertexArray(linesVao);
-        gl.bindBuffer(gl.ARRAY_BUFFER, linesVbo);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, linesIbo);
-        gl.bufferData(
-          gl.ARRAY_BUFFER,
-          new Float32Array(lines.current.points.flatMap((ps) => ps)),
-          gl.DYNAMIC_DRAW,
-        );
-        gl.enableVertexAttribArray(linesIndex);
-        gl.vertexAttribPointer(linesIndex, 2, gl.FLOAT, false, 0, 0);
-        gl.bufferData(
-          gl.ELEMENT_ARRAY_BUFFER,
-          new Uint16Array(lines.current.indices.flatMap((indices) => indices)),
-          gl.DYNAMIC_DRAW,
-        );
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-        // gl.bindVertexArray(null);
-        linesChanged.current = false;
-      }
-      gl.bindVertexArray(linesVao);
-      gl.drawElements(
-        gl.TRIANGLES,
-        lines.current.indices.length * 3,
-        gl.UNSIGNED_SHORT,
-        0,
-      );
-      gl.bindVertexArray(null);
+
+      linesDrawer.current?.render();
 
       gl.flush();
       gl.endFrameEXP();
       requestAnimationFrame(renderLoop);
     }
     requestAnimationFrame(renderLoop);
-    // gl.endFrameEXP();
   };
   return (
-    <View
-      style={{
-        flex: 1,
-        flexDirection: "column",
-        justifyContent: "space-between",
-        alignItems: "center",
-        padding: 24,
-      }}
-    >
-      <GLView
-        style={{ width: 300, height: 300 }}
-        onContextCreate={onContextCreate}
-      />
-      <Pressable
-        style={{ padding: 20, backgroundColor: "blue", borderRadius: 4 }}
-        onPress={() => {
-          lines.current = genSegmentedLines();
-          linesChanged.current = true;
-        }}
-      >
-        <Text style={{ fontSize: 20, color: "white" }}>Regenerate</Text>
-      </Pressable>
-    </View>
+    <GestureHandlerRootView>
+      <GestureDetector gesture={pan}>
+        <View
+          style={{
+            flex: 1,
+            flexDirection: "column",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: 24,
+          }}
+        >
+          <GLView
+            style={{ width: 300, height: 300 }}
+            onContextCreate={onContextCreate}
+          />
+          <Pressable
+            style={{ padding: 20, backgroundColor: "blue", borderRadius: 4 }}
+            onPress={() => {
+              lines.current = genSegmentedLines();
+              linesChanged.current = true;
+            }}
+          >
+            <Text style={{ fontSize: 20, color: "white" }}>Regenerate</Text>
+          </Pressable>
+        </View>
+      </GestureDetector>
+    </GestureHandlerRootView>
   );
 }
 
