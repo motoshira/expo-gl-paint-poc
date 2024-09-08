@@ -219,11 +219,16 @@ export default function App() {
     linesDrawer.current = new LinesDrawer(gl);
     linesDrawer.current?.reset(150, 150);
     linesDrawer.current?.lineTo(300, 300);
-    gl.clearColor(0, 1, 1, 1);
+    // FIXME 重なって表示されない オフスクリーンレンダリングが必要かも？
+    setTimeout(() => {
+      linesDrawer.current?.lineTo(150, 200);
+    }, 1000);
+
+    // gl.clearColor(0, 1, 1, 1);
 
     function renderLoop() {
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      // gl.clear(gl.COLOR_BUFFER_BIT);
       /* gl.uniform2f(
        *   resolutionLocaiton,
        *   gl.drawingBufferWidth,
