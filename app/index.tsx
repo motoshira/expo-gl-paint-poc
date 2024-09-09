@@ -42,6 +42,7 @@ class LinesDrawer {
   static LINES_BUFFER_LENGTH = 16 * 2 * 2 * 3 + 2 * 2 * 3;
   private gl: ExpoWebGLRenderingContext;
   private target: WebGLRenderbuffer | null;
+  private frameBuffer: WebGLRenderbuffer | null;
   private program: WebGLProgram;
   private vao: WebGLVertexArrayObject;
   private vbo: WebGLBuffer;
@@ -115,6 +116,43 @@ class LinesDrawer {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     this.vbo = vbo;
     this.vao = vao;
+
+    const renderBuffer = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, renderBuffer);
+    gl.renderbufferStorage(
+      gl.RENDERBUFFER,
+      gl.DEPTH_COMPONENT16,
+      gl.drawingBufferWidth,
+      gl.drawingBufferHeight,
+    );
+
+    const tex = gl.createTexture();
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      width,
+      height,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      null,
+    );
+
+    const frameBuffer = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+    gl.framebufferRenderbuffer(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.RENDERBUFFER,
+      renderBuffer,
+    );
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
   }
   reset(sx: number, sy: number) {
     const { gl } = this;
@@ -223,12 +261,14 @@ export default function App() {
     setTimeout(() => {
       linesDrawer.current?.lineTo(150, 200);
     }, 1000);
-
-    // gl.clearColor(0, 1, 1, 1);
+    gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.clearColor(0, 1, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
 
     function renderLoop() {
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-      // gl.clear(gl.COLOR_BUFFER_BIT);
       /* gl.uniform2f(
        *   resolutionLocaiton,
        *   gl.drawingBufferWidth,
