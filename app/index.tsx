@@ -1,7 +1,6 @@
 import React, { useRef } from "react";
 import { Pressable, Text, View } from "react-native";
 import { GLView, ExpoWebGLRenderingContext } from "expo-gl";
-import Delaunator from "delaunator";
 import getNormals from "polyline-normals";
 import {
   Gesture,
@@ -41,53 +40,36 @@ class LinesDrawer {
   // 正十六角形・長方形
   static LINES_BUFFER_LENGTH = 16 * 2 * 2 * 3 + 2 * 2 * 3;
   private gl: ExpoWebGLRenderingContext;
-  private target: WebGLRenderbuffer | null;
   private frameBuffer: WebGLRenderbuffer | null;
-  private program: WebGLProgram;
-  private vao: WebGLVertexArrayObject;
-  private vbo: WebGLBuffer;
+  private texture: WebGLTexture;
+  private lineProgram: WebGLProgram;
+  private lineVao: WebGLVertexArrayObject;
+  private lineVbo: WebGLBuffer;
+  private linesVao: WebGLVertexArrayObject;
   private radius: number = 0.02;
   private points: number[] = [];
   private prevPoint: number[] | undefined = undefined;
-  constructor(
+  private linesProgram: WebGLProgram;
+  static _createProgram(
     gl: ExpoWebGLRenderingContext,
-    target: WebGLRenderbuffer | null = null,
+    vertSource: string,
+    fragSource: string,
   ) {
-    this.gl = gl;
-    this.target = target;
     const vert = gl.createShader(gl.VERTEX_SHADER);
     if (!vert) {
       throw new Error("Failed to create vertex shader");
     }
-
-    gl.shaderSource(
-      vert,
-      `#version 300 es
-    in vec2 position;
-
-    void main(void) {
-      gl_Position = vec4(position.x, position.y, 0.0, 1.0);
-    }
-    `,
-    );
+    gl.shaderSource(vert, vertSource);
     gl.compileShader(vert);
+    console.log(gl.getShaderInfoLog(vert));
 
     const frag = gl.createShader(gl.FRAGMENT_SHADER);
     if (!frag) {
       throw new Error("Failed to create fragment shader");
     }
-    gl.shaderSource(
-      frag,
-      `#version 300 es
-    precision mediump float;
-    out vec4 outColor;
-
-    void main(void) {
-      outColor = vec4(0.0, 0.0, 0.0, 1.0);
-    }
-  `,
-    );
+    gl.shaderSource(frag, fragSource);
     gl.compileShader(frag);
+    console.log(gl.getShaderInfoLog(frag));
 
     const program = gl.createProgram();
     if (!program) {
@@ -96,26 +78,47 @@ class LinesDrawer {
     gl.attachShader(program, vert);
     gl.attachShader(program, frag);
     gl.linkProgram(program);
-    this.program = program;
+    console.log(gl.getProgramInfoLog(program));
+    return program;
+  }
+  constructor(gl: ExpoWebGLRenderingContext) {
+    this.gl = gl;
+    const lineVert = `#version 300 es
+    in vec2 position;
+
+    void main(void) {
+      gl_Position = vec4(position.x, position.y, 0.0, 1.0);
+    }
+    `;
+    const lineFrag = `#version 300 es
+    precision mediump float;
+    out vec4 outColor;
+
+    void main(void) {
+      outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    `;
+    const lineProgram = LinesDrawer._createProgram(gl, lineVert, lineFrag);
+    this.lineProgram = lineProgram;
 
     const vao = gl.createVertexArray()!;
     gl.bindVertexArray(vao);
     const vbo = gl.createBuffer()!;
-    this.vbo = vbo;
+    this.lineVbo = vbo;
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferData(
       gl.ARRAY_BUFFER,
       LinesDrawer.LINES_BUFFER_LENGTH * 10,
       gl.DYNAMIC_DRAW,
     );
-    const positionIndex = gl.getAttribLocation(program, "position");
+    const positionIndex = gl.getAttribLocation(lineProgram, "position");
     gl.enableVertexAttribArray(positionIndex);
     gl.vertexAttribPointer(positionIndex, 2, gl.FLOAT, false, 0, 0);
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    this.vbo = vbo;
-    this.vao = vao;
+    this.lineVbo = vbo;
+    this.lineVao = vao;
 
     const renderBuffer = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, renderBuffer);
@@ -126,10 +129,11 @@ class LinesDrawer {
       gl.drawingBufferHeight,
     );
 
-    const tex = gl.createTexture();
+    const texture = gl.createTexture()!;
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
@@ -150,27 +154,80 @@ class LinesDrawer {
       gl.RENDERBUFFER,
       renderBuffer,
     );
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      texture,
+      0,
+    );
+    this.frameBuffer = frameBuffer;
+    this.texture = texture;
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+
+    // lines
+    const linesVert = `#version 300 es
+    in vec2 position;
+    out vec2 vPosition;
+
+    void main(void) {
+      gl_Position = vec4(position.x, position.y, 0.0, 1.0);
+      vPosition = (gl_Position.xy + vec2(1.0)) / 2.0;
+    }
+    `;
+    const linesFrag = `#version 300 es
+    precision mediump float;
+    uniform sampler2D texture0;
+    in vec2 vPosition;
+    out vec4 outColor;
+
+    void main(void) {
+      vec4 c = texture(texture0, vPosition);
+      outColor = vec4(c.rgb, 1.0);
+    }
+    `;
+    const linesProgram = LinesDrawer._createProgram(gl, linesVert, linesFrag);
+    this.linesProgram = linesProgram;
+    const linesVao = gl.createVertexArray()!;
+    gl.bindVertexArray(linesVao);
+    const linesVbo = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, linesVbo);
+    // ビルボード
+    const positions = [-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1];
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+    const positionAttrLoc = gl.getAttribLocation(linesProgram, "position");
+    gl.enableVertexAttribArray(positionAttrLoc);
+    gl.vertexAttribPointer(positionAttrLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this.linesVao = linesVao;
+    // TODO configure uniform location
   }
   reset(sx: number, sy: number) {
-    const { gl } = this;
+    const { gl, frameBuffer } = this;
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
+    // clear framebuffer
+    gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // clear
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     this.points = [];
     this.prevPoint = [sx / width, sy / height].map((p) => p * 2.0 - 1.0);
   }
   lineTo(x: number, y: number) {
     // TODO
-    const { gl, vbo, prevPoint, radius } = this;
+    const { gl, lineVbo: vbo, prevPoint, radius: radius } = this;
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
     const np = [x / width, y / height].map((p) => p * 2.0 - 1.0);
     if (!prevPoint) {
       throw new Error("prevPoint not set");
     }
-    // TODO set points (circle and rectangle)
+    // set points (circle and rectangle)
     const points: number[] = [];
     for (let i = 0; i < 16; i++) {
       const p0 = Vec2.addVec2(
@@ -214,19 +271,22 @@ class LinesDrawer {
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(points));
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    console.log(prevPoint, np, points);
+    // render to framebuffer
+    gl.useProgram(this.lineProgram);
+    gl.bindVertexArray(this.lineVao);
+    gl.clearColor(1, 1, 1, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, LinesDrawer.LINES_BUFFER_LENGTH);
+    gl.bindVertexArray(null);
     this.points = points;
     this.prevPoint = np;
   }
-  render() {
-    const { gl, program, vao, points } = this;
-    if (points.length === 0) {
-      return;
-    }
-    gl.useProgram(program);
-    gl.bindVertexArray(vao);
-    gl.drawArrays(gl.TRIANGLES, 0, LinesDrawer.LINES_BUFFER_LENGTH);
-    gl.bindVertexArray(null);
+  commit() {
+    const { gl, linesProgram, linesVao } = this;
+    gl.useProgram(linesProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.bindVertexArray(linesVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6 * 2);
   }
 }
 
@@ -254,34 +314,39 @@ export default function App() {
     })
     .minDistance(1);
   const onContextCreate = (gl: ExpoWebGLRenderingContext) => {
-    linesDrawer.current = new LinesDrawer(gl);
-    linesDrawer.current?.reset(150, 150);
-    linesDrawer.current?.lineTo(300, 300);
-    // FIXME 重なって表示されない オフスクリーンレンダリングが必要かも？
-    setTimeout(() => {
-      linesDrawer.current?.lineTo(150, 200);
-    }, 1000);
     gl.disable(gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.clearColor(0, 1, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
 
-    function renderLoop() {
-      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-      /* gl.uniform2f(
-       *   resolutionLocaiton,
-       *   gl.drawingBufferWidth,
-       *   gl.drawingBufferHeight,
-       * ); */
+    linesDrawer.current = new LinesDrawer(gl);
+    linesDrawer.current?.reset(150, 150);
+    linesDrawer.current?.lineTo(300, 300);
+    linesDrawer.current?.commit();
+    gl.flush();
+    gl.endFrameEXP();
 
-      linesDrawer.current?.render();
-
+    setTimeout(() => {
+      linesDrawer.current?.lineTo(150, 200);
+      linesDrawer.current?.commit();
       gl.flush();
       gl.endFrameEXP();
-      requestAnimationFrame(renderLoop);
-    }
-    requestAnimationFrame(renderLoop);
+    }, 1000);
+
+    setTimeout(() => {
+      linesDrawer.current?.lineTo(200, 350);
+      linesDrawer.current?.commit();
+      gl.flush();
+      gl.endFrameEXP();
+    }, 2000);
+
+    /*
+     * function renderLoop() {
+     *   gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+     *   requestAnimationFrame(renderLoop);
+     * }
+     * requestAnimationFrame(renderLoop); */
   };
   return (
     <GestureHandlerRootView>
@@ -302,8 +367,8 @@ export default function App() {
           <Pressable
             style={{ padding: 20, backgroundColor: "blue", borderRadius: 4 }}
             onPress={() => {
-              lines.current = genSegmentedLines();
-              linesChanged.current = true;
+              // lines.current = genSegmentedLines();
+              // linesChanged.current = true;
             }}
           >
             <Text style={{ fontSize: 20, color: "white" }}>Regenerate</Text>
@@ -347,65 +412,3 @@ const catmullRomSpline = (
  *   return [];
  * };
  *  */
-
-const genSegmentedLines = (): {
-  points: number[][];
-  indices: number[][];
-} => {
-  const points: number[][] = [];
-  const ls: number[][] = [];
-  const rs: number[][] = [];
-  let p0: number[] = [Math.random() * 2 - 1, Math.random() * 2 - 1];
-  let p1: number[] = p0;
-  let p2: number[] = p0;
-  let p3: number[] = p0;
-  for (let i = 0; i < 10; i++) {
-    // [x, y]
-    p0 = p1;
-    p1 = p2;
-    p2 = p3;
-    p3 = [Math.random() * 2 - 1, Math.random() * 2 - 1];
-    if (p1[0] !== p2[0] && p1[1] !== p2[1]) {
-      for (let t = 0; t < 10; t++) {
-        const p = catmullRomSpline(p0, p1, p2, p3, t * 0.1);
-        points.push(p);
-      }
-    }
-  }
-  const normals: number[][] = getNormals(points, false).map(
-    (ps: unknown[]) => ps[0] as number[],
-  );
-  for (let i = 0; i < normals.length; i++) {
-    const p = points[i];
-    const n = normals[i];
-    ls.push([p[0] + n[0] * 0.005, p[1] + n[1] * 0.005]);
-    rs.push([p[0] - n[0] * 0.005, p[1] - n[1] * 0.005]);
-  }
-  const indices: number[][] = [];
-  const ss: number[][] = [];
-  let index: number = 0;
-  // l0, c0, r0, l1, c1, r1, ...
-  for (let i = 0; i < points.length - 1; i++) {
-    const l0 = ls[i];
-    const l1 = ls[i + 1];
-    const c0 = points[i];
-    const c1 = points[i + 1];
-    const r0 = rs[i];
-    const r1 = rs[i + 1];
-    if (i === 0) {
-      ss.push(l0, c0, r0);
-    }
-    ss.push(l1, c1, r1);
-    indices.push(
-      [index, index + 1, index + 3],
-      [index + 3, index + 1, index + 4],
-      [index + 1, index + 2, index + 4],
-      [index + 4, index + 2, index + 5],
-    );
-    index += 3;
-  }
-  return {
-    points: ss,
-    indices: indices,
-  };
-};
