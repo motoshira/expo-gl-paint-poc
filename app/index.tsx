@@ -36,6 +36,9 @@ class Vec2 {
   }
 }
 
+export class Lines {}
+x;
+
 class LinesDrawer {
   // 正十六角形・長方形
   static LINES_BUFFER_LENGTH = 16 * 2 * 2 * 3 + 2 * 2 * 3;
