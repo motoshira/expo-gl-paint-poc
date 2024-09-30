@@ -8,6 +8,49 @@ import {
   GestureHandlerRootView,
 } from "react-native-gesture-handler";
 
+class WebGLUtils {
+  static createFrameBufferWithTexture(gl: ExpoWebGLRenderingContext) {
+    const frameBuffer = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+    const texture = gl.createTexture()!;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      gl.drawingBufferWidth,
+      gl.drawingBufferHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      null,
+    );
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      texture,
+      0,
+    );
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { frameBuffer, texture };
+  }
+  static renderTexturesInOrder(
+    gl: ExpoWebGLRenderingContext,
+    textures: WebGLTexture[],
+    draw: () => void,
+  ) {
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    for (let i = 0; i < textures.length; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, textures[i]);
+      draw();
+    }
+  }
+}
+
 class Vec2 {
   static rotate(v: number[], theta: number) {
     return [
@@ -35,9 +78,6 @@ class Vec2 {
     return v.map((x) => x / r);
   }
 }
-
-export class Lines {}
-x;
 
 class LinesDrawer {
   // 正十六角形・長方形
